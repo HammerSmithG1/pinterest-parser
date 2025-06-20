@@ -17,7 +17,7 @@ client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
 ideas_col = db[MONGO_COLLECTION]
 
-BATCH_SIZE = 20
+BATCH_SIZE = 10
 
 # Pinterest API request parameters
 API_URL = "https://pinterest.com/resource/InterestResource/get/"
@@ -27,7 +27,7 @@ HEADERS = {
 
 def build_request(url):
     match = re.search(r'/(\d+)/?$', url)
-    interest_id = match.group(1) if match else "933065609551"
+    interest_id = match.group(1)
     data_payload = {
         "options": {
             "field_set_key": "ideas_hub",
@@ -46,7 +46,7 @@ def build_request(url):
     return full_url
 
 def fetch_url(url):
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             full_url = build_request(url)
             response = requests.get(full_url, headers=HEADERS)
@@ -59,17 +59,94 @@ def fetch_url(url):
             if not d or "seo_canonical_display_name" not in d:
                 print(f"Expected data missing in response for {url}")
                 continue
+
+            # Extract path (skip last breadcrumb)
+            breadcrumbs = d.get("seo_breadcrumbs")
+            if not isinstance(breadcrumbs, list):
+                breadcrumbs = []
+            if len(breadcrumbs) > 1:
+                path_ids = "/".join(str(b["id"]) for b in breadcrumbs[:-1])
+                path_names = "/".join(str(b["name"]) for b in breadcrumbs[:-1])
+                path = {
+                    "id": path_ids,
+                    "name": path_names
+                }
+            else:
+                path = None
+
+            # Extract references
+            seo_related_interests = d.get("seo_related_interests") or []
+            ideas_klp_pivots = d.get("ideas_klp_pivots") or []
+
+            # # Retry logic if both are empty
+            # if attempt < 4 and not seo_related_interests and not ideas_klp_pivots:
+            #     print(f"Attempt {attempt+1}: No references found for {url}, retrying...")
+            #     # time.sleep(1)
+            #     continue
+
+            references = []
+            for ref in seo_related_interests:
+                references.append({
+                    "id": ref.get("id"),
+                    "name": ref.get("name"),
+                    "as": "interest",
+                    "url": ref.get("url")
+                })
+            for pivot in ideas_klp_pivots:
+                # Extract id from pivot_url
+                pivot_url = pivot.get("pivot_url", "")
+                match = re.search(r'/(\d+)/?$', pivot_url)
+                pivot_id = match.group(1) if match else ""
+                references.append({
+                    "id": pivot_id,
+                    "name": pivot.get("pivot_full_name"),
+                    "as": "pivot",
+                    "url": pivot_url
+                })
+            # if len(references) == 0:
+            #     print(data)
+            #     print(f"No references found for {url}")
+
+            # Upsert references into MongoDB (only name, id, source="ref")
+            # for ref in references:
+            #     ref_url = ref.get("url")
+            #     if not ref.get("id") or not ref_url:
+            #         continue
+            #     # Extract name from url
+            #     try:
+            #         from urllib.parse import urlparse, unquote
+            #         parsed = urlparse(ref_url)
+            #         parts = parsed.path.strip('/').split('/')
+            #         ref_id = parts[-1] if len(parts) >= 3 else None
+            #         ref_name = unquote(parts[-2]) if len(parts) >= 3 else None
+            #     except Exception:
+            #         ref_id = ref.get("id")
+            #         ref_name = ref.get("name")
+            #     if ideas_col.count_documents({"id": ref_id}, limit=1) == 0:
+            #         doc = {
+            #             "id": ref_id,
+            #             "name": ref_name,
+            #             "source": "ref",
+            #             "status": "unprocessed",
+            #             "created_at": datetime.now(timezone.utc)
+            #         }
+            #         ideas_col.insert_one(doc)
+
             row = {
+                "id": d.get("id", ""),
+                "cannonical_term_id": (d.get("canonical_term") or {}).get("id", "") if d.get("canonical_term") else "",
+                "key": d.get("key", ""),
+                "path": path,
+                "references": references,
                 "seo_canonical_display_name": d.get("seo_canonical_display_name", ""),
                 "follower_count": d.get("follower_count", 0),
-                "internal_search_count": d.get("internal_search_count", 0),
-                "canonical_term_id": (d.get("canonical_term") or {}).get("id", "")
+                "internal_search_count": d.get("internal_search_count", 0)
             }
             return (url, row, None)
         except Exception as e:
             print(f"Attempt {attempt+1} failed for {url}: {e}")
             continue
-    return (url, None, "Failed after 3 attempts")
+    return (url, None, f"Failed after {attempt} attempts")
 
 def process_batch(batch):
     results = []
@@ -100,29 +177,52 @@ def main():
             break
 
         results = process_batch(batch)
-        now = datetime.now(timezone.utc)
-        for _id, info in results:
-            ideas_col.update_one(
-                {"_id": _id},
-                {
-                    "$set": {
-                        "info": info,
-                        "status": "processed",
-                        "processed_at": now
-                    }
-                }
-            )
         processed_count += len(results)
+        # now = datetime.now(timezone.utc)
+        # new_urls_count = 0  # Track new URLs created in this batch
+        # for _id, info in results:
+        #     # Count new URLs created by checking the "references" field in info
+        #     if info and "references" in info:
+        #         for ref in info["references"]:
+        #             ref_url = ref.get("url")
+        #             if not ref.get("id") or not ref_url:
+        #                 continue
+        #             try:
+        #                 from urllib.parse import urlparse, unquote
+        #                 parsed = urlparse(ref_url)
+        #                 parts = parsed.path.strip('/').split('/')
+        #                 ref_id = parts[-1] if len(parts) >= 3 else None
+        #                 ref_name = unquote(parts[-2]) if len(parts) >= 3 else None
+        #             except Exception:
+        #                 ref_id = ref.get("id")
+        #                 ref_name = ref.get("name")
+        #             # Check if this reference was just created (status=unprocessed and created_at ~ now)
+        #             # But since we use upsert, we can check if it existed before
+        #             # Instead, increment if it was not present before
+        #             if ideas_col.count_documents({"id": ref_id}, limit=1) == 0:
+        #                 new_urls_count += 1
+        #     ideas_col.update_one(
+        #         {"_id": _id},
+        #         {
+        #             "$set": {
+        #                 "info": info,
+        #                 "status": "processed",
+        #                 "processed_at": now
+        #             }
+        #         }
+        #     )
+       
+        # total_to_process += new_urls_count  # Increase total count left
 
         elapsed = time.time() - start_time
         speed = processed_count / elapsed * 60 if elapsed > 0 else 0
         remaining = total_to_process - processed_count
         eta = (remaining / speed) if speed > 0 else 0
-        avg_speed = (processed_count / elapsed * 60) if elapsed > 0 else 0
-
+    
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
               f"{processed_count}/{total_to_process} processed | elapsed: {elapsed:.1f}s | "
-              f"speed: {speed:.1f}/min (avg {avg_speed:.1f}/min) | est left: {eta:.1f} min")
+              f"speed: {speed:.1f}/min | est left: {eta:.1f} min")
+            #   f" | new urls: {new_urls_count}")
 
 if __name__ == "__main__":
     main()
