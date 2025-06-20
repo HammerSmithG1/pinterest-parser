@@ -177,42 +177,19 @@ def main():
             break
 
         results = process_batch(batch)
+        now = datetime.now(timezone.utc)
+        for _id, info in results:
+            ideas_col.update_one(
+                {"_id": _id},
+                {
+                    "$set": {
+                        "info": info,
+                        "status": "processed",
+                        "processed_at": now
+                    }
+                }
+            )
         processed_count += len(results)
-        # now = datetime.now(timezone.utc)
-        # new_urls_count = 0  # Track new URLs created in this batch
-        # for _id, info in results:
-        #     # Count new URLs created by checking the "references" field in info
-        #     if info and "references" in info:
-        #         for ref in info["references"]:
-        #             ref_url = ref.get("url")
-        #             if not ref.get("id") or not ref_url:
-        #                 continue
-        #             try:
-        #                 from urllib.parse import urlparse, unquote
-        #                 parsed = urlparse(ref_url)
-        #                 parts = parsed.path.strip('/').split('/')
-        #                 ref_id = parts[-1] if len(parts) >= 3 else None
-        #                 ref_name = unquote(parts[-2]) if len(parts) >= 3 else None
-        #             except Exception:
-        #                 ref_id = ref.get("id")
-        #                 ref_name = ref.get("name")
-        #             # Check if this reference was just created (status=unprocessed and created_at ~ now)
-        #             # But since we use upsert, we can check if it existed before
-        #             # Instead, increment if it was not present before
-        #             if ideas_col.count_documents({"id": ref_id}, limit=1) == 0:
-        #                 new_urls_count += 1
-        #     ideas_col.update_one(
-        #         {"_id": _id},
-        #         {
-        #             "$set": {
-        #                 "info": info,
-        #                 "status": "processed",
-        #                 "processed_at": now
-        #             }
-        #         }
-        #     )
-       
-        # total_to_process += new_urls_count  # Increase total count left
 
         elapsed = time.time() - start_time
         speed = processed_count / elapsed * 60 if elapsed > 0 else 0
