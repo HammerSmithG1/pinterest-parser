@@ -1,0 +1,13 @@
+# Ignore output files and folders
+output/
+mongo_data/
+venv/
+*.out
+*.log
+*/__pycache__/
+
+# Ignore MongoDB data directories
+/data/
+dump/
+*.bson
+*.ns
